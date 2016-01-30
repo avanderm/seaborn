@@ -2566,3 +2566,134 @@ class TestLVPlotter(CategoricalFixture):
                                ["a", "b", "c"])
 
         plt.close("all")
+
+class AggregateFixture(PlotTestCase):
+    """Test data for aggregation plots."""
+    rs = np.random.RandomState(11)
+    n_rows = 100
+
+    y = rs.randn(n_rows, 2)
+
+    # categorical data
+    cat1 = pd.Series(np.random.choice(list("abc"), n_rows), name="cat1").astype('category')
+    cat2 = pd.Series(np.random.choice(list("de"), n_rows), name="cat2").astype('category')
+    cat3 = pd.Series(np.random.choice([1,2,3], n_rows), name="cat3").astype('category')
+    cat4 = pd.Series(np.random.choice([4,5], n_rows)).astype('category')
+
+    # categorical data not catagorized
+    grp1 = pd.Series(np.random.choice(list("ghi"), n_rows), name="grp1")
+    grp2 = pd.Series(np.random.choice([6,7,8], n_rows))
+
+    
+    var_data = pd.DataFrame(y, columns=pd.Series(list("YZ")))
+    cat_data = pd.concat([cat1, cat2, grp1, cat3, cat4, grp2], axis=1)
+
+    data = pd.concat([cat_data, var_data], axis=1)
+
+class AggregatePlot(AggregateFixture):
+
+    def test_bad_inputs_no_categoricals(self):
+        # no x value will start a search for categorical cols in data
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(y="Y", data=self.data[["grp1", 1, "Y"]])
+
+    def test_bad_inputs_rollup_group_not_present(self):
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(x=["cat2","cat9"], y="Y", data=self.data)
+
+    def test_bad_inputs_unit_not_present(self):
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(y="F", data=self.data)
+
+    def test_bad_inputs_unit_not_numeric(self):
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(y=0, data=self.data)
+
+    def test_bad_inputs_u_group_not_present(self):
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(x=["cat1", 1], u=["cat3", "cat8"], data=self.data)
+
+    def test_bad_inputs_data_not_present(self):
+        # when x or y is a string or list of strings, data must be supplied
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            p._agg_establish_data(x=["cat1", "cat2", 0], y="Z")
+
+    def test_bad_inputs_overlap(self):
+        p = cat._AggregatePlotter()
+
+        # overlap unit and rollup
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0, "Z"], u="grp1", y="Z", data=self.data)
+
+        # overlap unit and u
+        p = cat._AggregatePlotter()
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
+
+        # overlap rollup and u
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
+
+        data = self.data[["cat1", "cat2", "grp1", "cat3", 0, 1]]
+        iter_data = data.iteritems()
+        data = [np.asarray(s) for k, s in iter_data]
+
+        # overlap unit and rollup
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=list(range(0,6)), y=5, data=data)
+
+        # overlap unit and unfold
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=list(range(0,6)), y=5, maxlevel=3, data=data)
+
+        # overlap rollup and unfold
+        with nt.assert_raises(ValueError):
+            df, y, x, u = p._agg_establish_data(x=list(range(0,3)), u=list(range(2,5)), y=5, data=data)
+
+
+    def test_odd_inputs_rollup_u_maxlevel(self):
+        # rollup variables after maxlevel are instead added to the u variables
+        p = cat._AggregatePlotter()
+        agg_data, unit_names, rollup_names, u_names = p._agg_establish_data(
+                x=["cat1", "cat3", "cat2", "grp1"], u=[0, 1], maxlevel=2, data=self.data)
+
+        nt.assert_equal(len(agg_data), 7)
+        npt.assert_array_equal(rollup_names, ["cat1", "cat3", "cat2"])
+        # remainder rollup variables are added to the front of the u scheme
+        npt.assert_array_equal(u_names, ["grp1", 0, 1])
+        npt.assert_array_equal(agg_data[0], self.data["cat1"].values)
+        npt.assert_array_equal(agg_data[1], self.data["cat3"].values)
+        npt.assert_array_equal(agg_data[2], self.data["cat2"].values)
+        npt.assert_array_equal(agg_data[3], self.data["grp1"].values)
+        npt.assert_array_equal(agg_data[4], self.data[0].values)
+        npt.assert_array_equal(agg_data[5], self.data[1].values)
+        npt.assert_array_equal(agg_data[6], np.ones(100))
+
+    def test_only_categorical(self):
+        p = cat._AggregatePlotter()
+        agg_data, unit_names, rollup_names, u_names = p._agg_establish_data(data=self.data)
+
+        nt.assert_equal(len(agg_data), 5)
+        nt.assert_equal(len(rollup_names), 4)
+
+    def test_common_representation(self):
+        p = cat._AggregatePlotter()
+        agg_data, unit_names, rollup_names, u_names = p._agg_establish_data(
+                x=["cat1", 1, "grp1"], u=[0, "cat2"], y="Y", data=self.data)
+
+        nt.assert_equal(len(agg_data), 6)
+        nt.assert_equal(unit_names, ["Y"])
+        npt.assert_array_equal(rollup_names, ["cat1", 1, "grp1"])
+        npt.assert_array_equal(u_names, [0, "cat2"])
+        npt.assert_array_equal(agg_data[0], self.data["cat1"].values)
+        npt.assert_array_equal(agg_data[1], self.data[1].values)
+        npt.assert_array_equal(agg_data[2], self.data["grp1"].values)
+        npt.assert_array_equal(agg_data[3], self.data[0].values)
+        npt.assert_array_equal(agg_data[4], self.data["cat2"].values)
+        npt.assert_array_equal(agg_data[5], self.data["Y"].values)
