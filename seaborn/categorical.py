@@ -1943,11 +1943,13 @@ class _LVPlotter(_CategoricalPlotter):
         if self.orient == "h":
             ax.invert_yaxis()
 
-class TestPlotter(_CategoricalPlotter):
-    pass
-
 class _AggregatePlotter(_CategoricalPlotter):
     """hierarchical dot chart of aggregates with rollup categorical organization."""
+    def __init__(self, x=None, u=None, y=None, data=None, maxlevel=None, func=None):
+        data, unit_names, rollup_names, unfold_names = self._agg_establish_data(x,u,y,data,maxlevel)
+
+    def establish_variables(self):
+        pass
 
     def _agg_establish_data(self, x=None, u=None, y=None, data=None, maxlevel=None):
         """Convert input specification into a common representation."""
@@ -1956,115 +1958,125 @@ class _AggregatePlotter(_CategoricalPlotter):
         u = [u] if self._isindex(u) else u
         y = [y] if self._isindex(y) else y
 
-        rollup_names = None
-        unfold_names = None
-        unit_names = None
-
-        # determine rollup_variables
-        if x is None:
-            rollup_names = []
-
-            # detect categoricals from columns in data
-            for i in data:
-                if pd.core.common.is_categorical_dtype(data[i]):
-                    rollup_names.append(i)
+        if data is None:
+            return [[]], [], [], []
         else:
-            rollup_names = x
+            # determine rollup_variables
+            rollup_names = None
+            if x is None and isinstance(data, pd.DataFrame):
+                rollup_names = []
 
-        maxlevel = len(rollup_names)-1 if maxlevel is None else maxlevel
+                # detect categoricals from columns in data
+                for i in data:
+                    if pd.core.common.is_categorical_dtype(data[i]):
+                        rollup_names.append(i)
+            else:
+                rollup_names = x
 
-        # determine unfold variables
-        if u is None:
-            # even with no unfold variables, unfold_names will be set to an empty array
-            unfold_names = rollup_names[maxlevel+1:]
-            rollup_names = rollup_names[:maxlevel+1]
-        else:
-            if x is None:
-                # subtract unfold variables from detected categoricals in data
-                rollup_names = [item for item in rollup_names if item not in u]
-            unfold_names = rollup_names[maxlevel+1:] + u
-            rollup_names = rollup_names[:maxlevel+1]
+            maxlevel = len(rollup_names)-1 if maxlevel is None else maxlevel
 
-        if y is not None:
-            # default instantiation to column of ones in case of a counting function
-            unit_names = y
+            # determine unfold variables
+            unfold_names = None
+            if u is None:
+                # even with no unfold variables, unfold_names will be set to an empty array
+                unfold_names = rollup_names[maxlevel+1:]
+                rollup_names = rollup_names[:maxlevel+1]
+            else:
+                if x is None:
+                    # subtract unfold variables from detected categoricals in data
+                    rollup_names = [item for item in rollup_names if item not in u]
 
-        # sanity checks: duplicates among rollup and unfold (duplicates among unit permitted)
-        if len(rollup_names) != len(set(rollup_names)):
-            raise ValueError("No duplicates allowed in rollup categories")
-        if len(unfold_names) != len(set(unfold_names)):
-            raise ValueError("No duplicates allowed in unfold categories")
+                unfold_names = rollup_names[maxlevel+1:] + u
+                rollup_names = rollup_names[:maxlevel+1]
 
-        # sanity checks: no rollup nor unfold names provided
-        if len(rollup_names) + len(unfold_names) == 0:
-            raise ValueError("No categories specified")
+            # determine unit variables
+            unit_names = None
+            if y is not None:
+                # default instantiation to column of ones in case of a counting function
+                unit_names = y
 
-        # sanity checks: overlap between rollup, unfold and unit categories
-        if len(set(rollup_names).intersection(set(unfold_names))) > 0:
-            raise ValueError("No overlap allowed in rollup and unfold categories")
-        if unit_names is not None:
-            if len(set(rollup_names).intersection(set(unit_names))) > 0:
-                raise ValueError("No overlap allowed in rollup and unit categories")
-            if len(set(unfold_names).intersection(set(unit_names))) > 0:
-                raise ValueError("No overlap allowed in unfold and unit categories")
+            # sanity checks: duplicates among rollup and unfold (duplicates among unit permitted)
+            if len(rollup_names) != len(set(rollup_names)):
+                raise ValueError("No duplicates allowed in rollup categories")
+            if len(unfold_names) != len(set(unfold_names)):
+                raise ValueError("No duplicates allowed in unfold categories")
 
-        if isinstance(data, pd.DataFrame):
-            # rollup, unfold and unit used to extract data
-            cols = rollup_names + unfold_names
+            # sanity checks: no rollup nor unfold names provided or found
+            if len(rollup_names) + len(unfold_names) == 0:
+                raise ValueError("No categories specified")
+
+            # sanity checks: overlap between rollup, unfold and unit categories
+            if len(set(rollup_names).intersection(set(unfold_names))) > 0:
+                raise ValueError("No overlap allowed in rollup and unfold categories")
             if unit_names is not None:
-                cols = cols + unit_names
+                if len(set(rollup_names).intersection(set(unit_names))) > 0:
+                    raise ValueError("No overlap allowed in rollup and unit categories")
+                if len(set(unfold_names).intersection(set(unit_names))) > 0:
+                    raise ValueError("No overlap allowed in unfold and unit categories")
 
-            missingcols = [col for col in cols if col not in data.columns]
-            #print(missingcols)
+            # data common representatoin before aggregating
+            if isinstance(data, pd.DataFrame):
+                # rollup, unfold and unit used to extract data
+                cols = rollup_names + unfold_names
+                if unit_names is not None:
+                    cols = cols + unit_names
 
-            for input in missingcols:
-                err = "Could not interpret input '{}'".format(input)
-                raise ValueError(err)
+                missingcols = [col for col in cols if col not in data.columns]
 
-            agg_data = [np.asarray(s) for k, s in data.get(cols,cols).iteritems()]
-            if unit_names is None:
-                agg_data.append(np.ones(len(data)))
-        else:
-            # rollup, unfold and unit used to label data
-            if hasattr(data, "shape"):
-                if len(data.shape) == 1:
-                    if np.isscalar(data[0]):
-                        agg_data = [data]
-                    else:
-                        agg_data = list(data)
-                elif len(data.shape) == 2:
-                    nr, nc = data.shape
-                    if nr == 1 or nc == 1:
-                        agg_data = [data.ravel()]
-                    else:
-                        agg_data = [data[:,i] for i in range(nc)]
-                else:
-                    err = "Input data can have no more than 2 dimensions"
+                for input in missingcols:
+                    err = "Could not interpret input '{}'".format(input)
                     raise ValueError(err)
-            elif data is None:
-                agg_data = [[]]
-            elif np.isscalar(data[0]):
-                agg_data = [data]
+
+                agg_data = [np.asarray(s) for k, s in data.get(cols,cols).iteritems()]
+                
+                # dummy column for functions such as count
+                if unit_names is None:
+                    agg_data.append(np.ones(len(data)))
             else:
-                agg_data = data
+                # rollup, unfold and unit used to label data
+                if hasattr(data, "shape"):
+                    if len(data.shape) == 1:
+                        if np.isscalar(data[0]):
+                            agg_data = [data]
+                        else:
+                            agg_data = list(data)
+                    elif len(data.shape) == 2:
+                        nr, nc = data.shape
+                        if nr == 1 or nc == 1:
+                            agg_data = [data.ravel()]
+                        else:
+                            agg_data = [data[:,i] for i in range(nc)]
+                    else:
+                        err = "Input data can have no more than 2 dimensions"
+                        raise ValueError(err)
+                elif data is None:
+                    agg_data = [[]]
+                elif np.isscalar(data[0]):
+                    agg_data = [data]
+                else:
+                    agg_data = data
 
-            if unit_names is None:
-                agg_data.append(np.ones(agg_data[0].size))
+                if unit_names is None:
+                    agg_data.append(np.ones(agg_data[0].size))
 
-            # sanity checks: equal sizes data and labels
-            if unit_names is None:
-                if len(rollup_names) + len(unfold_names) != len(agg_data) - 1:
-                    raise ValueError("Number of supplied labels does not match input size")
-            else:
-                if len(rollup_names) + len(unfold_names) + len(unit_names) != len(agg_data):
-                    raise ValueError("Number of supplied labels does not match input size")
+                # sanity checks: equal sizes data and labels
+                #TODO: multiple function applied to unit variable
+                if unit_names is None:
+                    if len(rollup_names) + len(unfold_names) != len(agg_data) - 1:
+                        raise ValueError("Number of supplied labels does not match input size")
+                else:
+                    if len(rollup_names) + len(unfold_names) + len(unit_names) != len(agg_data):
+                        raise ValueError("Number of supplied labels does not match input size")
 
-        return agg_data, unit_names, rollup_names, unfold_names
+            return agg_data, unit_names, rollup_names, unfold_names
 
     def _isindex(self, arg):
         return isinstance(arg, string_types) or isinstance(arg, int) or isinstance(arg, tuple)
 
-    def agg_aggregate_data(self, x, y, func, data):
+    def _agg_aggregate_data(self, rollup=None, unfold=None, unit=None, data=None, maxlevel=None, func=None):
+        """Aggregate data from commmon representation using func."""
+
+        
         pass
 
     def draw_aggregateplot(self, ax, kws):
@@ -3806,5 +3818,4 @@ def aggregateplot(x=None, unfold=None, y=None, func=None, data=None, hue=None,
               order=None, hue_order=None, orient=None, color=None, palette=None,
               size=5, edgecolor="gray", linewidth=0, ax=None, **kwargs):
     
-    plotter = _AggregatePlotter(x, unfold, y, func, data, hue, order, hue_order,
-                                orient, color, palette)
+    plotter = _AggregatePlotter()

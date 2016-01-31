@@ -2618,27 +2618,21 @@ class AggregatePlot(AggregateFixture):
         with nt.assert_raises(ValueError):
             p._agg_establish_data(x=["cat1", 1], u=["cat3", "cat8"], data=self.data)
 
-    def test_bad_inputs_data_not_present(self):
-        # when x or y is a string or list of strings, data must be supplied
-        p = cat._AggregatePlotter()
-        with nt.assert_raises(ValueError):
-            p._agg_establish_data(x=["cat1", "cat2", 0], y="Z")
-
     def test_bad_inputs_overlap(self):
         p = cat._AggregatePlotter()
 
         # overlap unit and rollup
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0, "Z"], u="grp1", y="Z", data=self.data)
+            p._agg_establish_data(x=["cat1", "cat2", 0, "Z"], u="grp1", y="Z", data=self.data)
 
         # overlap unit and u
         p = cat._AggregatePlotter()
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
+            p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
 
         # overlap rollup and u
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
+            p._agg_establish_data(x=["cat1", "cat2", 0], u=[0, "grp1"], data=self.data)
 
         data = self.data[["cat1", "cat2", "grp1", "cat3", 0, 1]]
         iter_data = data.iteritems()
@@ -2646,15 +2640,15 @@ class AggregatePlot(AggregateFixture):
 
         # overlap unit and rollup
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=list(range(0,6)), y=5, data=data)
+            p._agg_establish_data(x=list(range(0,6)), y=5, data=data)
 
         # overlap unit and unfold
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=list(range(0,6)), y=5, maxlevel=3, data=data)
+            p._agg_establish_data(x=list(range(0,6)), y=5, maxlevel=3, data=data)
 
         # overlap rollup and unfold
         with nt.assert_raises(ValueError):
-            df, y, x, u = p._agg_establish_data(x=list(range(0,3)), u=list(range(2,5)), y=5, data=data)
+            p._agg_establish_data(x=list(range(0,3)), u=list(range(2,5)), y=5, data=data)
 
 
     def test_odd_inputs_rollup_u_maxlevel(self):
