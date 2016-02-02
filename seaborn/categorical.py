@@ -12,6 +12,7 @@ from matplotlib.collections import PatchCollection
 import matplotlib.patches as Patches
 import matplotlib.pyplot as plt
 import warnings
+import pdb
 
 from .external.six import string_types
 from .external.six.moves import range
@@ -1952,16 +1953,11 @@ class _AggregatePlotter(_CategoricalPlotter):
         pass
 
     def establish_variables(self, rollup=None, unfold=None, values=None, data=None, maxlevel=None, func=None):
-        # gather data into dataframe
-        data, rollup, unfold, values = self._agg_establish_data(rollup, unfold, values, data, maxlevel)
-        # aggregate using rollup hierarchy
-        agg_data = self._agg_aggregate_data(data, rollup, unfold, values)
+        """Extracts variables of interest and aggregates into a common representation."""
 
-        super.establish_variables(data=agg_data)
-
-    def _agg_establish_data(self, rollup=None, unfold=None, values=None, data=None, maxlevel=None):
-        """Convert input specification into a common representation."""
-
+        # Step 1:
+        # Retrieve data and construct a dataframe
+        # ---------------------------------------
         rollup = _convert_by(rollup)
         unfold = _convert_by(unfold)
         values = _convert_by(values)
@@ -2008,7 +2004,6 @@ class _AggregatePlotter(_CategoricalPlotter):
 
         # determine unfold variables
         if not unfold:
-            # even with no unfold variables, unfold_names will be set to an empty array
             unfold_names = rollup_names[maxlevel+1:]
             rollup_names = rollup_names[:maxlevel+1]
         else:
@@ -2026,54 +2021,66 @@ class _AggregatePlotter(_CategoricalPlotter):
             values_names = values
             keys = keys + values_names
 
-
+        # categorize rollup and unfold data
         for c in rollup_names + unfold_names:
             if not pd.core.common.is_categorical_dtype(data[c]):
-                #s = np.asarray(pd.unique(agg_data[c]), dtype=str)
                 data[c] = data[c].astype("category")
 
+            # resolve int-str clash and avoid uniqueness issues by cutoff of "all"
             s = np.asarray(data[c].cat.categories, dtype=str)
             data[c].cat.rename_categories(s, inplace=True)
 
-            if c in rollup_names:
+            if c in rollup_names[1:]:
                 s = np.insert(np.sort(s), 0, "all") if "all" not in s else s
             data[c].cat.set_categories(s, ordered=True, inplace=True)
 
+        #TODO: checks
+        # retrieve data for aggregation
         agg_data = data.get(keys, keys)
 
+        # dummy values if no output values are given
         if not values:
             values_names = ["dummy"]
             agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=values_names[0])], axis=1)
 
-        return agg_data, rollup_names, unfold_names, values_names
+        # Step 2:
+        # Aggregate data in a recursive manner, from fine to coarse grained
+        # -----------------------------------------------------------------
+        agg = self._recursive_aggregate(rollup=rollup_names, unfold=unfold_names,
+                                        values=values_names, data=agg_data,
+                                        aggfunc=func, fill_value=np.nan)
 
-    def _agg_aggregate_data(self, rollup=None, unfold=None, values=None, data=None,
-                            aggfunc=None, fill_value=np.nan):
-        """Aggregate data from commmon representation using func."""
+        # pivot tables do not preserve category ordering, need to reorder
+        index = agg.index.names
+        for i in range(len(index)):
+            agg = agg.reindex(index=agg_data[index[i]].cat.categories, level=i)
 
+        return agg, agg_data
+
+    def _recursive_aggregate(self, rollup=None, unfold=None, values=None, data=None, aggfunc=None, fill_value=None):
+        """Compute aggregate of values categorized by rollup and unfold. Aggregates from sublevels in rollup are added."""
+
+        pdb.set_trace()
         # compute aggregate for current level in rollup
         keys = rollup + unfold + values
         agg_data = pd.pivot_table(
                 data.get(keys, keys), values=values, index=rollup, columns=unfold, aggfunc=aggfunc, fill_value=fill_value)
 
-        # retrieve aggregate data from higher hierarchies
+        # retrieve aggregate data from higher hierarchies (coarse grain)
         if rollup[:-1]:
             # clean current data multindex from redundant rows
-            for l in range(len(rollup)):
+            for l in range(1, len(rollup)):
                 agg_data.drop("all", level=l, inplace=True)
 
-            agged = self._agg_aggregate_data(rollup=rollup[:-1], unfold=unfold,
-                                             values=values, data=data,
-                                             aggfunc=aggfunc, fill_value=fill_value)
+            agged = self._recursive_aggregate(rollup=rollup[:-1], unfold=unfold,
+                                              values=values, data=data,
+                                              aggfunc=aggfunc, fill_value=fill_value)
 
             # include index for current level
             agged.set_index(pd.Series(['all'] * len(agged)), append=True, inplace=True)
 
             # combine
             agg_data = pd.concat([agg_data, agged]).sort_index()
-        else:
-            # level paramater in drop works only for multindex
-            agg_data.drop("all", inplace=True)
         
         return agg_data
 
