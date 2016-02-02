@@ -4,6 +4,8 @@ import colorsys
 import numpy as np
 from scipy import stats
 import pandas as pd
+from pandas.core.index import MultiIndex, Index
+from pandas.core.groupby import Grouper
 from pandas.core.series import remove_na
 import matplotlib as mpl
 from matplotlib.collections import PatchCollection
@@ -1945,139 +1947,135 @@ class _LVPlotter(_CategoricalPlotter):
 
 class _AggregatePlotter(_CategoricalPlotter):
     """hierarchical dot chart of aggregates with rollup categorical organization."""
-    def __init__(self, x=None, u=None, y=None, data=None, maxlevel=None, func=None):
-        data, unit_names, rollup_names, unfold_names = self._agg_establish_data(x,u,y,data,maxlevel)
-
-    def establish_variables(self):
+    def __init__(self, r=None, u=None, y=None, data=None, maxlevel=None, func=None):
+        #self.establish_variables(x, u, y, data, maxlevel, func)
         pass
 
-    def _agg_establish_data(self, x=None, u=None, y=None, data=None, maxlevel=None):
+    def establish_variables(self, rollup=None, unfold=None, values=None, data=None, maxlevel=None, func=None):
+        # gather data into dataframe
+        data, rollup, unfold, values = self._agg_establish_data(rollup, unfold, values, data, maxlevel)
+        # aggregate using rollup hierarchy
+        agg_data = self._agg_aggregate_data(data, rollup, unfold, values)
+
+        super.establish_variables(data=agg_data)
+
+    def _agg_establish_data(self, rollup=None, unfold=None, values=None, data=None, maxlevel=None):
         """Convert input specification into a common representation."""
 
-        x = [x] if self._isindex(x) else x
-        u = [u] if self._isindex(u) else u
-        y = [y] if self._isindex(y) else y
+        rollup = _convert_by(rollup)
+        unfold = _convert_by(unfold)
+        values = _convert_by(values)
 
-        if data is None:
-            return [[]], [], [], []
-        else:
-            # determine rollup_variables
-            rollup_names = None
-            if x is None and isinstance(data, pd.DataFrame):
-                rollup_names = []
-
-                # detect categoricals from columns in data
-                for i in data:
-                    if pd.core.common.is_categorical_dtype(data[i]):
-                        rollup_names.append(i)
-            else:
-                rollup_names = x
-
-            maxlevel = len(rollup_names)-1 if maxlevel is None else maxlevel
-
-            # determine unfold variables
-            unfold_names = None
-            if u is None:
-                # even with no unfold variables, unfold_names will be set to an empty array
-                unfold_names = rollup_names[maxlevel+1:]
-                rollup_names = rollup_names[:maxlevel+1]
-            else:
-                if x is None:
-                    # subtract unfold variables from detected categoricals in data
-                    rollup_names = [item for item in rollup_names if item not in u]
-
-                unfold_names = rollup_names[maxlevel+1:] + u
-                rollup_names = rollup_names[:maxlevel+1]
-
-            # determine unit variables
-            unit_names = None
-            if y is not None:
-                # default instantiation to column of ones in case of a counting function
-                unit_names = y
-
-            # sanity checks: duplicates among rollup and unfold (duplicates among unit permitted)
-            if len(rollup_names) != len(set(rollup_names)):
-                raise ValueError("No duplicates allowed in rollup categories")
-            if len(unfold_names) != len(set(unfold_names)):
-                raise ValueError("No duplicates allowed in unfold categories")
-
-            # sanity checks: no rollup nor unfold names provided or found
-            if len(rollup_names) + len(unfold_names) == 0:
-                raise ValueError("No categories specified")
-
-            # sanity checks: overlap between rollup, unfold and unit categories
-            if len(set(rollup_names).intersection(set(unfold_names))) > 0:
-                raise ValueError("No overlap allowed in rollup and unfold categories")
-            if unit_names is not None:
-                if len(set(rollup_names).intersection(set(unit_names))) > 0:
-                    raise ValueError("No overlap allowed in rollup and unit categories")
-                if len(set(unfold_names).intersection(set(unit_names))) > 0:
-                    raise ValueError("No overlap allowed in unfold and unit categories")
-
-            # data common representatoin before aggregating
-            if isinstance(data, pd.DataFrame):
-                # rollup, unfold and unit used to extract data
-                cols = rollup_names + unfold_names
-                if unit_names is not None:
-                    cols = cols + unit_names
-
-                missingcols = [col for col in cols if col not in data.columns]
-
-                for input in missingcols:
-                    err = "Could not interpret input '{}'".format(input)
-                    raise ValueError(err)
-
-                agg_data = [np.asarray(s) for k, s in data.get(cols,cols).iteritems()]
-                
-                # dummy column for functions such as count
-                if unit_names is None:
-                    agg_data.append(np.ones(len(data)))
-            else:
-                # rollup, unfold and unit used to label data
-                if hasattr(data, "shape"):
-                    if len(data.shape) == 1:
-                        if np.isscalar(data[0]):
-                            agg_data = [data]
-                        else:
-                            agg_data = list(data)
-                    elif len(data.shape) == 2:
-                        nr, nc = data.shape
-                        if nr == 1 or nc == 1:
-                            agg_data = [data.ravel()]
-                        else:
-                            agg_data = [data[:,i] for i in range(nc)]
+        # convert input data
+        if not isinstance(data, pd.DataFrame):
+            if hasattr(data, "shape"):
+                if len(data.shape) == 1:
+                    if np.isscalar(data[0]):
+                        data = pd.DataFrame(data)
                     else:
-                        err = "Input data can have no more than 2 dimensions"
-                        raise ValueError(err)
-                elif data is None:
-                    agg_data = [[]]
-                elif np.isscalar(data[0]):
-                    agg_data = [data]
+                        data = pd.DataFrame(list(data)).T
+                elif len(data.shape) == 2:
+                    nr, nc = data.shape
+                    if nr == 1 or nc == 1:
+                        data = pd.DataFrame(data.ravel())
+                    else:
+                        data = pd.DataFrame(data)
                 else:
-                    agg_data = data
+                    err = "Input data can have no more than 2 dimensions"
+                    raise ValueError(err)
+            elif data is None:
+                data = pd.DataFrame()
+            elif np.isscalar(data[0]):
+                data = pd.DataFrame(data)
+            else:
+                data = pd.DataFrame()
 
-                if unit_names is None:
-                    agg_data.append(np.ones(agg_data[0].size))
+            # integer column types clash with pivot tables
+            data.columns = data.columns.astype('str')
 
-                # sanity checks: equal sizes data and labels
-                #TODO: multiple function applied to unit variable
-                if unit_names is None:
-                    if len(rollup_names) + len(unfold_names) != len(agg_data) - 1:
-                        raise ValueError("Number of supplied labels does not match input size")
-                else:
-                    if len(rollup_names) + len(unfold_names) + len(unit_names) != len(agg_data):
-                        raise ValueError("Number of supplied labels does not match input size")
+        # determine rollup_variables
+        if not rollup:
+            rollup_names = []
 
-            return agg_data, unit_names, rollup_names, unfold_names
+            # detect categoricals from columns in data
+            for i in data:
+                if pd.core.common.is_categorical_dtype(data[i]):
+                    rollup_names.append(i)
+        else:
+            rollup_names = rollup
 
-    def _isindex(self, arg):
-        return isinstance(arg, string_types) or isinstance(arg, int) or isinstance(arg, tuple)
+        maxlevel = len(rollup_names)-1 if maxlevel is None else maxlevel
 
-    def _agg_aggregate_data(self, rollup=None, unfold=None, unit=None, data=None, maxlevel=None, func=None):
+        # determine unfold variables
+        if not unfold:
+            # even with no unfold variables, unfold_names will be set to an empty array
+            unfold_names = rollup_names[maxlevel+1:]
+            rollup_names = rollup_names[:maxlevel+1]
+        else:
+            if not rollup:
+                # subtract unfold variables from detected categoricals in data
+                rollup_names = [item for item in rollup_names if item not in unfold]
+
+            unfold_names = rollup_names[maxlevel+1:] + unfold
+            rollup_names = rollup_names[:maxlevel+1]
+
+        keys = rollup_names + unfold_names
+
+        # determine unit variables
+        if values:
+            values_names = values
+            keys = keys + values_names
+
+
+        for c in rollup_names + unfold_names:
+            if not pd.core.common.is_categorical_dtype(data[c]):
+                #s = np.asarray(pd.unique(agg_data[c]), dtype=str)
+                data[c] = data[c].astype("category")
+
+            s = np.asarray(data[c].cat.categories, dtype=str)
+            data[c].cat.rename_categories(s, inplace=True)
+
+            if c in rollup_names:
+                s = np.insert(np.sort(s), 0, "all") if "all" not in s else s
+            data[c].cat.set_categories(s, ordered=True, inplace=True)
+
+        agg_data = data.get(keys, keys)
+
+        if not values:
+            values_names = ["dummy"]
+            agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=values_names[0])], axis=1)
+
+        return agg_data, rollup_names, unfold_names, values_names
+
+    def _agg_aggregate_data(self, rollup=None, unfold=None, values=None, data=None,
+                            aggfunc=None, fill_value=np.nan):
         """Aggregate data from commmon representation using func."""
 
+        # compute aggregate for current level in rollup
+        keys = rollup + unfold + values
+        agg_data = pd.pivot_table(
+                data.get(keys, keys), values=values, index=rollup, columns=unfold, aggfunc=aggfunc, fill_value=fill_value)
+
+        # retrieve aggregate data from higher hierarchies
+        if rollup[:-1]:
+            # clean current data multindex from redundant rows
+            for l in range(len(rollup)):
+                agg_data.drop("all", level=l, inplace=True)
+
+            agged = self._agg_aggregate_data(rollup=rollup[:-1], unfold=unfold,
+                                             values=values, data=data,
+                                             aggfunc=aggfunc, fill_value=fill_value)
+
+            # include index for current level
+            agged.set_index(pd.Series(['all'] * len(agged)), append=True, inplace=True)
+
+            # combine
+            agg_data = pd.concat([agg_data, agged]).sort_index()
+        else:
+            # level paramater in drop works only for multindex
+            agg_data.drop("all", inplace=True)
         
-        pass
+        return agg_data
 
     def draw_aggregateplot(self, ax, kws):
         pass
@@ -2089,6 +2087,19 @@ class _AggregatePlotter(_CategoricalPlotter):
         self.annotate_axes(ax)
         if self.orient == "h":
             ax.invert_yaxis()
+
+# adapted from pivot.py in pandas
+def _convert_by(by):
+    if by is None:
+        return []
+    elif (np.isscalar(by) or isinstance(by, (np.ndarray, Index,
+                                             pd.Series, Grouper))
+          or hasattr(by, '__call__')):
+        by = [by]
+    else:
+        by = list(by)
+    return by
+
 
 _categorical_docs = dict(
 
