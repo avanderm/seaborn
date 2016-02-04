@@ -1947,20 +1947,20 @@ class _LVPlotter(_CategoricalPlotter):
             ax.invert_yaxis()
 
 class _AggregatePlotter(_CategoricalPlotter):
-    """hierarchical dot chart of aggregates with rollup categorical organization."""
-    def __init__(self, r=None, u=None, y=None, data=None, maxlevel=None, func=None):
-        #self.establish_variables(x, u, y, data, maxlevel, func)
-        pass
 
-    def establish_variables(self, rollup=None, unfold=None, values=None, data=None, maxlevel=None, func=None):
+    def __init__(self, x, y, data, r_depth, aggfunc,
+                 orient, color, palette):
+
+        self.establish_variables(x=x, y=y, data=data, r_depth=r_depth, aggfunc=aggfunc)
+        self.establish_colors(color, palette, 1)
+
+    def establish_variables(self, x=None, y=None, data=None, r_depth=None, aggfunc=None):
         """Extracts variables of interest and aggregates into a common representation."""
 
         # Step 1:
         # Retrieve data and construct a dataframe
         # ---------------------------------------
-        rollup = _convert_by(rollup)
-        unfold = _convert_by(unfold)
-        values = _convert_by(values)
+        rollup = _convert_by(x)
 
         # convert input data
         if not isinstance(data, pd.DataFrame):
@@ -1986,111 +1986,193 @@ class _AggregatePlotter(_CategoricalPlotter):
             else:
                 data = pd.DataFrame()
 
-            # integer column types clash with pivot tables
+            # hack: integer column types clash with pivot tables
             data.columns = data.columns.astype('str')
 
         # determine rollup_variables
         if not rollup:
-            rollup_names = []
+            rollup = []
 
             # detect categoricals from columns in data
             for i in data:
                 if pd.core.common.is_categorical_dtype(data[i]):
-                    rollup_names.append(i)
-        else:
-            rollup_names = rollup
+                    rollup.append(i)
 
-        maxlevel = len(rollup_names)-1 if maxlevel is None else maxlevel
+        # r_depth splits categories into rollup and unfold
+        r_depth = r_depth if r_depth else len(rollup)
 
         # determine unfold variables
-        if not unfold:
-            unfold_names = rollup_names[maxlevel+1:]
-            rollup_names = rollup_names[:maxlevel+1]
-        else:
-            if not rollup:
-                # subtract unfold variables from detected categoricals in data
-                rollup_names = [item for item in rollup_names if item not in unfold]
+        unfold_names = rollup[r_depth:]
+        rollup_names = rollup[:r_depth]
 
-            unfold_names = rollup_names[maxlevel+1:] + unfold
-            rollup_names = rollup_names[:maxlevel+1]
-
-        keys = rollup_names + unfold_names
-
-        # determine unit variables
-        if values:
-            values_names = values
-            keys = keys + values_names
+        unfold_label = ', '.join(unfold_names)
+        rollup_label = ', '.join(rollup_names)
 
         # categorize rollup and unfold data
-        for c in rollup_names + unfold_names:
-            if not pd.core.common.is_categorical_dtype(data[c]):
-                data[c] = data[c].astype("category")
+        for col in rollup:
+            if not pd.core.common.is_categorical_dtype(data[col]):
+                data[col] = data[col].astype("category")
 
             # resolve int-str clash and avoid uniqueness issues by cutoff of "all"
-            s = np.asarray(data[c].cat.categories, dtype=str)
-            data[c].cat.rename_categories(s, inplace=True)
+            s = np.asarray(data[col].cat.categories, dtype=str)
+            data[col].cat.rename_categories(s, inplace=True)
 
-            if c in rollup_names[1:]:
+            # label for aggregating over lower rollup categories
+            if col in rollup_names[1:r_depth]:
                 s = np.insert(np.sort(s), 0, "all") if "all" not in s else s
-            data[c].cat.set_categories(s, ordered=True, inplace=True)
+            data[col].cat.set_categories(s, ordered=True, inplace=True)
 
-        #TODO: checks
-        # retrieve data for aggregation
-        agg_data = data.get(keys, keys)
+        datacols = data.columns
+        for col in rollup:
+            if col not in datacols:
+                err = "No such category: {}".format(col)
+                raise ValueError(err)
 
-        # dummy values if no output values are given
-        if not values:
-            values_names = ["dummy"]
-            agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=values_names[0])], axis=1)
+        # variable to be aggregated over
+        if y:
+            value_label = y
+
+            if y not in datacols:
+                err = "No such variable: {}".format(y)
+                raise ValueError(err)
+
+            agg_data = data.get(rollup + [y])
+        else:
+            if hasattr(aggfunc, "__name__"):
+                value_label = aggfunc.__name__
+            elif isinstance(aggfunc, string_types):
+                value_label = aggfunc
+            else:
+                value_label = "agg"
+
+            agg_data = data.get(rollup)
+            agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=value_label)], axis=1)
 
         # Step 2:
         # Aggregate data in a recursive manner, from fine to coarse grained
         # -----------------------------------------------------------------
-        agg = self._recursive_aggregate(rollup=rollup_names, unfold=unfold_names,
-                                        values=values_names, data=agg_data,
-                                        aggfunc=func, fill_value=np.nan)
+        agg = self._recursive_aggregate(r=rollup_names, u=unfold_names,
+                                        y=value_label, data=agg_data,
+                                        aggfunc=aggfunc, fill_value=np.nan)
 
-        # pivot tables do not preserve category ordering, need to reorder
-        index = agg.index.names
-        for i in range(len(index)):
-            agg = agg.reindex(index=agg_data[index[i]].cat.categories, level=i)
+        # multilevel pivot tables do not preserve category ordering, need to reorder
+        agg_rollup = agg.index.names
+        if agg_rollup[1:]:
+            for i in range(len(agg_rollup)):
+                agg = agg.reindex(index=agg_data[agg_rollup[i]].cat.categories, level=i)
+        else:
+            # level argument not permitted for single level indices
+            agg = agg.reindex(index=agg_data[agg_rollup[0]].cat.categories)
 
-        return agg, agg_data
+        agg_unfold = agg.columns.names
+        if agg_unfold[1:]:
+            for i in range(len(agg_unfold)):
+                agg = agg.reindex(columns=agg_data[agg_unfold[i]].cat.categories, level=i)
+        else:
+            # level argument not permitted for single level columns
+            agg = agg.reindex(columns=agg_data[agg_unfold[0]].cat.categories)
 
-    def _recursive_aggregate(self, rollup=None, unfold=None, values=None, data=None, aggfunc=None, fill_value=None):
+        # save plotting data
+        super().establish_variables(data=agg, orient="h")
+        
+        self.rollup_names = agg.index.values
+        self.rollup_label = rollup_label
+
+        self.group_label = unfold_label
+        self.r_depth = r_depth
+
+        self.value_label = value_label
+
+    def _recursive_aggregate(self, r=None, u=None, y=None, data=None, aggfunc=None, fill_value=None):
         """Compute aggregate of values categorized by rollup and unfold. Aggregates from sublevels in rollup are added."""
 
-        pdb.set_trace()
         # compute aggregate for current level in rollup
-        keys = rollup + unfold + values
+        keys = r + u + _convert_by(y)
+
         agg_data = pd.pivot_table(
-                data.get(keys, keys), values=values, index=rollup, columns=unfold, aggfunc=aggfunc, fill_value=fill_value)
+                data.get(keys), values=y, index=r, columns=u, aggfunc=aggfunc, fill_value=fill_value)
 
         # retrieve aggregate data from higher hierarchies (coarse grain)
-        if rollup[:-1]:
+        if r[:-1]:
             # clean current data multindex from redundant rows
-            for l in range(1, len(rollup)):
+            for l in range(1, len(r)):
                 agg_data.drop("all", level=l, inplace=True)
 
-            agged = self._recursive_aggregate(rollup=rollup[:-1], unfold=unfold,
-                                              values=values, data=data,
-                                              aggfunc=aggfunc, fill_value=fill_value)
+            agg_upper = self._recursive_aggregate(r=r[:-1], u=u, y=y, data=data,
+                                                 aggfunc=aggfunc, fill_value=fill_value)
 
             # include index for current level
-            agged.set_index(pd.Series(['all'] * len(agged)), append=True, inplace=True)
+            agg_upper.set_index(pd.Series(['all'] * len(agg_upper)), append=True, inplace=True)
 
             # combine
-            agg_data = pd.concat([agg_data, agged]).sort_index()
+            agg_data = pd.concat([agg_data, agg_upper]).sort_index()
         
         return agg_data
 
+    def annotate_axes(self, ax):
+        """Add descriptive labels to an Axes object."""
+        if self.orient == "v":
+            xlabel, ylabel = self.rollup_label, self.value_label
+        else:
+            xlabel, ylabel = self.value_label, self.rollup_label
+
+        if xlabel is not None:
+            ax.set_xlabel(xlabel)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel)
+
+        if self.orient == "v":
+            ax.set_xticks(np.arange(len(self.rollup_names)))
+            ax.set_xticklabels(self.rollup_names)
+        else:
+            ax.set_yticks(np.arange(len(self.rollup_names)))
+            ax.set_yticklabels(self.rollup_names)
+
+        if self.orient == "v":
+            ax.xaxis.grid(False)
+            ax.set_xlim(-.5, len(self.rollup_names) - .5)
+        else:
+            ax.yaxis.grid(False)
+            ax.set_ylim(-.5, len(self.rollup_names) - .5)
+
+        if self.hue_names is not None:
+            leg = ax.legend(loc="best")
+            if self.hue_title is not None:
+                leg.set_title(self.hue_title)
+
+                # Set the title size a roundabout way to maintain
+                # compatability with matplotlib 1.1
+                try:
+                    title_size = mpl.rcParams["axes.labelsize"] * .85
+                except TypeError:  # labelsize is something like "large"
+                    title_size = mpl.rcParams["axes.labelsize"]
+                prop = mpl.font_manager.FontProperties(size=title_size)
+                leg._legend_title_box._text.set_font_properties(prop)
+
     def draw_aggregateplot(self, ax, kws):
-        pass
+        """Draw aggregate plot on current axis."""
+
+        # hierarchical levels for rollup
+        levels = np.zeros(len(self.rollup_names), np.int)
+        for i, r in enumerate(self.rollup_names):
+            try:
+                levels[i] = r.index("all") - 1
+            except ValueError:
+                levels[i] = self.r_depth - 1
+
+        maxmarkersize = 15
+        
+        for i, agg in enumerate(np.array(self.plot_data).T):
+            markersize = maxmarkersize * 0.7**levels[i]
+
+            s = np.argsort(np.abs(agg))[::-1]
+            for j in s:
+                ax.plot([agg[j], 0], [i, i], 'o-', c=self.colors[j], markersize=markersize, markevery=2)
 
     def plot(self, ax, kws):
         """Make the plot."""
         self.draw_aggregateplot(ax, kws)
-        self.add_legend_data(ax)
+        #self.add_legend_data(ax)
         self.annotate_axes(ax)
         if self.orient == "h":
             ax.invert_yaxis()
@@ -3832,8 +3914,14 @@ lvplot.__doc__ = dedent("""\
 
     """).format(**_categorical_docs)
 
-def aggregateplot(x=None, unfold=None, y=None, func=None, data=None, hue=None,
+def aggregateplot(x=None, y=None, data=None, r_depth=None, aggfunc=None, hue=None,
               order=None, hue_order=None, orient=None, color=None, palette=None,
               size=5, edgecolor="gray", linewidth=0, ax=None, **kwargs):
     
-    plotter = _AggregatePlotter()
+    plotter = _AggregatePlotter(x, y, data, r_depth, aggfunc, orient, color, palette)
+
+    if ax is None:
+        ax = plt.gca()
+
+    plotter.plot(ax, kwargs)
+    return ax
