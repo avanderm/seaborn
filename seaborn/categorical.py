@@ -1069,8 +1069,6 @@ class _CategoricalScatterPlotter(_CategoricalPlotter):
     @property
     def point_colors(self):
         """Return a color for each scatter point based on group and hue."""
-        import pdb
-        pdb.set_trace()
         colors = []
         for i, group_data in enumerate(self.plot_data):
 
@@ -2044,35 +2042,22 @@ class _AggregatePlotter(_CategoricalScatterPlotter):
         unfold_desc = ', '.join(unfold)
         group_label = ', '.join(rollup)
 
-        if y:
-            value_label = y
+        if hasattr(aggfunc, "__name__"):
+            value_label = aggfunc.__name__
+        elif isinstance(aggfunc, string_types):
+            value_label = aggfunc
         else:
-            if hasattr(aggfunc, "__name__"):
-                value_label = aggfunc.__name__
-            elif isinstance(aggfunc, string_types):
-                value_label = aggfunc
-            else:
-                value_label = "aggregate"
+            value_label = "aggregate"
+        if y:
+            value_label += " of {}".format(y)
 
-        self.group_label = group_label
         self.group_depth = len(rollup)
-        self.value_label = value_label
 
         # Step 2:
         # Aggregate data in a rollup manner
         # ---------------------------------
         agg = self._recursive_aggregate(r=rollup, u=unfold, y=y, data=data,
                                         aggfunc=aggfunc, fill_value=np.nan)
-
-        # hierarchical levels for rollup
-        group_level = np.zeros(len(agg), np.int)
-        for i, r in enumerate(agg.index.values):
-            try:
-                group_level[i] = r.index("all") - 1
-            except (ValueError, AttributeError):
-                group_level[i] = self.group_depth - 1
-
-        self.group_level = group_level
 
         if not rollup or not unfold:
             if rollup:
@@ -2097,13 +2082,26 @@ class _AggregatePlotter(_CategoricalScatterPlotter):
             # index
             agg = agg.reindex(columns=data[unfold[0]].cat.categories)
 
+        # hierarchical levels for rollup
+        group_level = np.zeros(len(agg), np.int)
+        for i, r in enumerate(agg.index.values):
+            try:
+                group_level[i] = r.index("all") - 1
+            except (ValueError, AttributeError):
+                group_level[i] = self.group_depth - 1
+
+        self.group_level = group_level
+
         # flatten index for tick labels
         agg.index = [', '.join(i) for i in agg.index.values]
 
         # save plotting data
         super().establish_variables(data=agg.T, orient=orient)
 
-        self.hue_names = agg.columns.values
+        self.group_label = group_label
+        self.value_label = value_label
+
+        self.hue_names = [', '.join(c) for c in agg.columns.values]
         self.hue_title = unfold_desc
 
     def _recursive_aggregate(self, r=None, u=None, y=None, data=None, aggfunc=None, fill_value=None):
@@ -2118,11 +2116,6 @@ class _AggregatePlotter(_CategoricalScatterPlotter):
                 else:
                     yield x
 
-        for col in r + u:
-            if col not in data.columns:
-                err = "No such category: {}".format(col)
-                raise ValueError(err)
-
         if y:
             if y not in data.columns:
                 err = "No such variable: {}".format(y)
@@ -2130,10 +2123,10 @@ class _AggregatePlotter(_CategoricalScatterPlotter):
 
             agg_data = data.get(r + u + [y])
         else:
-            agg_data = data.get(r + u)
-            agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=self.value_label)], axis=1)
+            y = 'dummy'
 
-            y = self.value_label
+            agg_data = data.get(r + u)
+            agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=y)], axis=1)
 
         # aggregation for current level (fine grain)
         agg = pd.pivot_table(
