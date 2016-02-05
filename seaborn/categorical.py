@@ -12,7 +12,6 @@ from matplotlib.collections import PatchCollection
 import matplotlib.patches as Patches
 import matplotlib.pyplot as plt
 import warnings
-import pdb
 
 from .external.six import string_types
 from .external.six.moves import range
@@ -70,8 +69,7 @@ class _CategoricalPlotter(object):
                             order.append(col)
                         except ValueError:
                             pass
-                import pdb
-                pdb.set_trace()
+
                 plot_data = data[order]
                 group_names = order
                 group_label = data.columns.name
@@ -1071,6 +1069,8 @@ class _CategoricalScatterPlotter(_CategoricalPlotter):
     @property
     def point_colors(self):
         """Return a color for each scatter point based on group and hue."""
+        import pdb
+        pdb.set_trace()
         colors = []
         for i, group_data in enumerate(self.plot_data):
 
@@ -1948,21 +1948,47 @@ class _LVPlotter(_CategoricalPlotter):
         if self.orient == "h":
             ax.invert_yaxis()
 
-class _AggregatePlotter(_CategoricalPlotter):
+class _AggregatePlotter(_CategoricalScatterPlotter):
 
-    def __init__(self, x, y, data, r_depth, aggfunc,
-                 orient, color, palette):
+    def __init__(self, x, y, hue, data, aggfunc,
+                 orient, color, palette,
+                 width, linewidth):
 
-        self.establish_variables(x=x, y=y, data=data, r_depth=r_depth, aggfunc=aggfunc)
+        self.establish_variables(x=x, y=y, hue=hue, data=data, aggfunc=aggfunc, orient=orient)
         self.establish_colors(color, palette, 1)
 
-    def establish_variables(self, x=None, y=None, data=None, r_depth=None, aggfunc=None):
+        self.width=width
+
+        if linewidth is None:
+            linewidth = mpl.rcParams["lines.linewidth"]
+        self.linewidth = linewidth
+
+    @property
+    def point_colors(self):
+        return self.colors
+
+    def establish_variables(self, x=None, y=None, hue=None, data=None, aggfunc=None,
+                            orient=None):
+
         """Extracts variables of interest and aggregates into a common representation."""
+
+        # adapted from pivot.py in pandas
+        def convert_by(by):
+            if by is None:
+                return []
+            elif (np.isscalar(by) or isinstance(by, (np.ndarray, Index,
+                                                     pd.Series, Grouper))
+                  or hasattr(by, '__call__')):
+                by = [by]
+            else:
+                by = list(by)
+            return by
 
         # Step 1:
         # Retrieve data and construct a dataframe
         # ---------------------------------------
-        rollup = _convert_by(x)
+        rollup = convert_by(x)
+        unfold = convert_by(hue)
 
         # convert input data
         if not isinstance(data, pd.DataFrame):
@@ -2001,28 +2027,22 @@ class _AggregatePlotter(_CategoricalPlotter):
                     rollup.append(i)
 
         # categorize rollup where needed
-        for col in rollup:
+        for col in rollup + unfold:
             if not pd.core.common.is_categorical_dtype(data[col]):
                 data[col] = data[col].astype("category")
 
-            # resolve int-str clash and avoid uniqueness issues by cutoff of "all"
+            # resolve int-str clash and avoid cutoff of "all"
             s = np.asarray(data[col].cat.categories, dtype=str)
             data[col].cat.rename_categories(s, inplace=True)
 
-            # label for aggregating over lower rollup categories
-            if col in rollup[1:r_depth]:
+            # all label for aggregating over lower rollup categories
+            if col in rollup[1:]:
                 s = np.insert(np.sort(s), 0, "all") if "all" not in s else s
+
             data[col].cat.set_categories(s, ordered=True, inplace=True)
 
-        # r_depth splits categories into rollup and unfold
-        r_depth = r_depth if r_depth is not None else len(rollup)
-
-        # determine unfold variables
-        unfold = rollup[r_depth:]
-        rollup = rollup[:r_depth]
-
-        unfold_label = ', '.join(unfold)
-        rollup_label = ', '.join(rollup)
+        unfold_desc = ', '.join(unfold)
+        group_label = ', '.join(rollup)
 
         if y:
             value_label = y
@@ -2034,20 +2054,26 @@ class _AggregatePlotter(_CategoricalPlotter):
             else:
                 value_label = "aggregate"
 
-        self.rollup_label = rollup_label
-        self.group_label = unfold_label
+        self.group_label = group_label
+        self.group_depth = len(rollup)
         self.value_label = value_label
 
-        self.r_depth = r_depth
-
         # Step 2:
-        # Aggregate data in a recursive manner, from fine to coarse grained
-        # -----------------------------------------------------------------
+        # Aggregate data in a rollup manner
+        # ---------------------------------
         agg = self._recursive_aggregate(r=rollup, u=unfold, y=y, data=data,
                                         aggfunc=aggfunc, fill_value=np.nan)
 
-        import pdb
-        pdb.set_trace()
+        # hierarchical levels for rollup
+        group_level = np.zeros(len(agg), np.int)
+        for i, r in enumerate(agg.index.values):
+            try:
+                group_level[i] = r.index("all") - 1
+            except (ValueError, AttributeError):
+                group_level[i] = self.group_depth - 1
+
+        self.group_level = group_level
+
         if not rollup or not unfold:
             if rollup:
                 agg = pd.DataFrame(agg)
@@ -2066,25 +2092,37 @@ class _AggregatePlotter(_CategoricalPlotter):
         if unfold[1:]:
             # multiindex
             for i in range(len(unfold)):
-                agg = agg.reindex(columns=data[unfold[i]].cat.categories, level=i+1)
+                agg = agg.reindex(columns=data[unfold[i]].cat.categories, level=i)
         elif unfold:
             # index
             agg = agg.reindex(columns=data[unfold[0]].cat.categories)
 
-        # save plotting data
-        super().establish_variables(data=agg, orient="h")
+        # flatten index for tick labels
+        agg.index = [', '.join(i) for i in agg.index.values]
 
-        self.rollup_names = agg.index.values
-        
+        # save plotting data
+        super().establish_variables(data=agg.T, orient=orient)
+
+        self.hue_names = agg.columns.values
+        self.hue_title = unfold_desc
+
     def _recursive_aggregate(self, r=None, u=None, y=None, data=None, aggfunc=None, fill_value=None):
         """Compute aggregate of y categorized by r and u. Aggregates from sublevels in r are added."""
+
+        # flattens list and tuples, used for multindex growing
+        def flatten(*args):
+            for x in args:
+                if isinstance(x, (list, tuple)):
+                    for i in x:
+                        yield from flatten(i)
+                else:
+                    yield x
 
         for col in r + u:
             if col not in data.columns:
                 err = "No such category: {}".format(col)
                 raise ValueError(err)
 
-        # variable to be aggregated over
         if y:
             if y not in data.columns:
                 err = "No such variable: {}".format(y)
@@ -2095,113 +2133,65 @@ class _AggregatePlotter(_CategoricalPlotter):
             agg_data = data.get(r + u)
             agg_data = pd.concat([agg_data, pd.Series(np.ones(len(agg_data)), name=self.value_label)], axis=1)
 
+            y = self.value_label
+
+        # aggregation for current level (fine grain)
         agg = pd.pivot_table(
                 agg_data, values=y, index=r, columns=u, aggfunc=aggfunc, fill_value=fill_value)
 
         # retrieve aggregate data from higher hierarchies (coarse grain)
         if r[:-1]:
-            # clean current data multindex from redundant rows
-            for l in range(1, len(r)):
-                agg.drop("all", level=l, inplace=True)
-
             agg_upper = self._recursive_aggregate(r=r[:-1], u=u, y=y, data=data,
                                                  aggfunc=aggfunc, fill_value=fill_value)
 
-            # include index for current level
-            agg_upper.index = pd.MultiIndex.from_tuples([tuple(_flatten((i, "all"))) for i in agg_upper.index])
+            # include index for current level (works also for series object)
+            agg_upper.index = pd.MultiIndex.from_tuples([tuple(flatten((i, "all"))) for i in agg_upper.index])
+
+            # clean current data multindex from redundant rows
+            for l in range(1, len(r)):
+                agg.drop("all", level=l, inplace=True)
 
             # combine
             agg = pd.concat([agg, agg_upper]).sort_index()
         
         return agg
 
-    def annotate_axes(self, ax):
-        """Add descriptive labels to an Axes object."""
-        if self.orient == "v":
-            xlabel, ylabel = self.rollup_label, self.value_label
-        else:
-            xlabel, ylabel = self.value_label, self.rollup_label
-
-        if xlabel is not None:
-            ax.set_xlabel(xlabel)
-        if ylabel is not None:
-            ax.set_ylabel(ylabel)
-
-        if self.orient == "v":
-            ax.set_xticks(np.arange(len(self.rollup_names)))
-            ax.set_xticklabels(self.rollup_names)
-        else:
-            ax.set_yticks(np.arange(len(self.rollup_names)))
-            ax.set_yticklabels(self.rollup_names)
-
-        if self.orient == "v":
-            ax.xaxis.grid(False)
-            ax.set_xlim(-.5, len(self.rollup_names) - .5)
-        else:
-            ax.yaxis.grid(False)
-            ax.set_ylim(-.5, len(self.rollup_names) - .5)
-
-        if self.hue_names is not None:
-            leg = ax.legend(loc="best")
-            if self.hue_title is not None:
-                leg.set_title(self.hue_title)
-
-                # Set the title size a roundabout way to maintain
-                # compatability with matplotlib 1.1
-                try:
-                    title_size = mpl.rcParams["axes.labelsize"] * .85
-                except TypeError:  # labelsize is something like "large"
-                    title_size = mpl.rcParams["axes.labelsize"]
-                prop = mpl.font_manager.FontProperties(size=title_size)
-                leg._legend_title_box._text.set_font_properties(prop)
-
     def draw_aggregateplot(self, ax, kws):
         """Draw aggregate plot on current axis."""
 
-        # hierarchical levels for rollup
-        levels = np.zeros(len(self.rollup_names), np.int)
-        for i, r in enumerate(self.rollup_names):
+        def is_numeric(s):
             try:
-                levels[i] = r.index("all") - 1
-            except (ValueError, AttributeError):
-                levels[i] = self.r_depth - 1
+                np.asarray(s, dtype=np.float)
+            except ValueError:
+                return False
+            return True
 
-        maxmarkersize = 15
-        
-        for i, agg in enumerate(np.array(self.plot_data).T):
-            markersize = maxmarkersize * 0.7**levels[i]
+        # unpack plotting options
+        markersize = kws.get("markersize", 15)
+        if is_numeric(markersize):
+            markersize = [markersize*kws.get("markerfactor", 0.7)**i for i in range(self.group_depth)]
 
+        alpha = kws.get("alpha", 1.0)
+
+        for i, agg in enumerate(np.array(self.plot_data)):
             s = np.argsort(np.abs(agg))[::-1]
             for j in s:
-                ax.plot([agg[j], 0], [i, i], 'o-', c=self.colors[j], markersize=markersize, markevery=2)
+                if self.orient == 'h':
+                    ax.plot([agg[j], 0], [i, i], 'o-', c=self.point_colors[j],
+                            linewidth=self.linewidth, markersize=markersize[self.group_level[i]],
+                            markevery=2, alpha=alpha)
+                else:
+                    ax.plot([i, i], [agg[j], 0], 'o-', c=self.point_colors[j],
+                            linewisth=self.linewidth, markersize=markersize[self.group_level[i]],
+                            markevery=2, alpha=alpha)
 
     def plot(self, ax, kws):
         """Make the plot."""
         self.draw_aggregateplot(ax, kws)
-        #self.add_legend_data(ax)
+        self.add_legend_data(ax)
         self.annotate_axes(ax)
         if self.orient == "h":
             ax.invert_yaxis()
-
-# adapted from pivot.py in pandas
-def _convert_by(by):
-    if by is None:
-        return []
-    elif (np.isscalar(by) or isinstance(by, (np.ndarray, Index,
-                                             pd.Series, Grouper))
-          or hasattr(by, '__call__')):
-        by = [by]
-    else:
-        by = list(by)
-    return by
-
-def _flatten(*args):
-    for x in args:
-        if isinstance(x, (list, tuple)):
-            for i in x:
-                yield from _flatten(i)
-        else:
-            yield x
 
 _categorical_docs = dict(
 
@@ -3927,11 +3917,11 @@ lvplot.__doc__ = dedent("""\
 
     """).format(**_categorical_docs)
 
-def aggregateplot(x=None, y=None, data=None, r_depth=None, aggfunc=None, hue=None,
-              order=None, hue_order=None, orient=None, color=None, palette=None,
-              size=5, edgecolor="gray", linewidth=0, ax=None, **kwargs):
+def aggregateplot(x=None, y=None, data=None, aggfunc=None, hue=None,
+                  order=None, hue_order=None, orient=None, color=None, palette=None,
+                  width=0.8, linewidth=None, ax=None, **kwargs):
     
-    plotter = _AggregatePlotter(x, y, data, r_depth, aggfunc, orient, color, palette)
+    plotter = _AggregatePlotter(x, y, hue, data, aggfunc, orient, color, palette, width, linewidth)
 
     if ax is None:
         ax = plt.gca()
